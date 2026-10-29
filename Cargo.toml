@@ -1,26 +1,28 @@
 # SPDX-FileCopyrightText: 2026 roolrz
 # SPDX-License-Identifier: Apache-2.0
 
+
 [package]
 name = "hyper-terminal"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/HypeR-Proj/terminal"
+repository = "https://github.com/HypeR-Proj/lib-terminal"
 publish = false
 description = "Native terminal settings, events and capability client"
+workspace = "../../app"
 
 [features]
-default = [
-    "client",
-]
-client = [
-    "dep:hyper-os",
-]
+default = ["client"]
+client = ["dep:hyper-os"]
+
+[dependencies]
 
 [dependencies.hyper-os]
-version = "=0.0.0"
+workspace = true
 optional = true
+
+[lints]
 
 [lints.clippy]
 doc_markdown = "deny"
@@ -39,12 +41,4 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = [
-    "cfg(target_os, values(\"hyper\"))",
-]
-
-[workspace]
-members = [
-    ".",
-]
-resolver = "3"
+check-cfg = ["cfg(target_os, values(\"hyper\"))"]

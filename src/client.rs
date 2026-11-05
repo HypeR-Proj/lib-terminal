@@ -8,7 +8,8 @@ use hyper_os::capability_channel::{
     CapabilityChannel, CapabilityDisposition, CapabilityReceiveSlot,
 };
 use hyper_os::handle::{
-    ByteChannelObject, CapabilityChannelObject, OwnedHandle, ProcessObject, Rights, RightsOffer,
+    ByteChannelObject, CapabilityChannelObject, HandleRef, OwnedHandle, ProcessObject, Rights,
+    RightsOffer,
 };
 use hyper_os::startup::{Startup, StartupPurpose};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
@@ -43,6 +44,50 @@ pub struct PreparedClient {
     pub stream: OwnedHandle<CapabilityChannelObject>,
     pub control: OwnedHandle<CapabilityChannelObject>,
     pub events: OwnedHandle<ByteChannelObject>,
+}
+
+/// Keep `events` in the supervisor; only `client` is delegated to the application.
+pub struct PreparedJob {
+    pub client: PreparedClient,
+    pub events: JobEvents,
+}
+
+/// Owning this endpoint keeps a bound job lease alive. Its closure revokes that
+/// lease even if a descendant retains ordinary terminal control or streams.
+pub struct JobEvents {
+    channel: OwnedHandle<ByteChannelObject>,
+    lease: u64,
+    last_sequence: u64,
+}
+
+impl JobEvents {
+    pub fn as_handle_ref(&self) -> HandleRef<'_, ByteChannelObject> {
+        self.channel.as_handle_ref()
+    }
+
+    pub fn wait_item(&self) -> WaitItem<'_> {
+        WaitItem::new(
+            self.as_handle_ref(),
+            ObjectSignals::<ByteChannelObject>::READABLE
+                .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+        )
+    }
+
+    pub fn try_receive(&mut self) -> Result<Option<crate::TerminationEvent>> {
+        let mut bytes = [0; crate::TerminationEvent::BYTES];
+        let length = match self.channel.as_byte_channel().try_receive(&mut bytes) {
+            Ok(length) => length,
+            Err(Error::Status(Status::WOULD_BLOCK)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let event =
+            crate::TerminationEvent::decode(&bytes[..length]).ok_or(Error::InvalidResponse)?;
+        if event.lease != self.lease || event.sequence <= self.last_sequence {
+            return Err(Error::InvalidResponse);
+        }
+        self.last_sequence = event.sequence;
+        Ok(Some(event))
+    }
 }
 
 pub struct Terminal {
@@ -86,20 +131,63 @@ impl Terminal {
     }
 
     pub fn prepare_child(&mut self) -> Result<PreparedClient> {
+        self.prepare(false).map(|(client, _)| client)
+    }
+
+    /// Prepares a foreground job whose lifetime is owned by its supervisor.
+    pub fn prepare_job(&mut self) -> Result<PreparedJob> {
+        let (client, events) = self.prepare(true)?;
+        Ok(PreparedJob {
+            client,
+            events: events.ok_or(Error::MissingHandle)?,
+        })
+    }
+
+    fn prepare(&mut self, job: bool) -> Result<(PreparedClient, Option<JobEvents>)> {
         let mut slots = [
             CapabilityReceiveSlot::new::<CapabilityChannelObject>(
                 hyper_os::stream::CONNECTOR_RIGHTS,
             ),
             CapabilityReceiveSlot::new::<CapabilityChannelObject>(CONTROL_RIGHTS),
             CapabilityReceiveSlot::new::<ByteChannelObject>(EVENT_RIGHTS),
+            CapabilityReceiveSlot::new::<ByteChannelObject>(EVENT_RIGHTS),
         ];
-        let (reply, _) = self.request(protocol::PREPARE, 0, &[], &mut [], &mut slots)?;
-        Ok(PreparedClient {
+        let operation = if job {
+            protocol::PREPARE_JOB
+        } else {
+            protocol::PREPARE
+        };
+        let count = if job { 4 } else { 3 };
+        let (reply, _) = self.request(operation, 0, &[], &mut [], &mut slots[..count])?;
+        let client = PreparedClient {
             id: reply.value,
             stream: slots[0].take()?.ok_or(Error::MissingHandle)?,
             control: slots[1].take()?.ok_or(Error::MissingHandle)?,
             events: slots[2].take()?.ok_or(Error::MissingHandle)?,
-        })
+        };
+        let events = if job {
+            Some(JobEvents {
+                channel: slots[3].take()?.ok_or(Error::MissingHandle)?,
+                lease: reply.value,
+                last_sequence: 0,
+            })
+        } else {
+            None
+        };
+        Ok((client, events))
+    }
+
+    /// Activates a job lease and observes its application's presentation owner.
+    /// Owner exit restores the baseline profile, but only release or closing
+    /// `JobEvents` revokes the lease and its streams.
+    pub fn bind_job(&mut self, id: u64, observer: OwnedHandle<ProcessObject>) -> Result<()> {
+        let mut owner = Some(observer);
+        let mut offers = [CapabilityDisposition::move_handle(
+            &mut owner,
+            RightsOffer::Exact(OBSERVER_RIGHTS),
+        )?];
+        self.request(protocol::BIND_JOB, id, &[], &mut offers, &mut [])?;
+        Ok(())
     }
 
     /// Transfers observation only, then atomically activates the child's lease.
@@ -176,6 +264,10 @@ impl Terminal {
 
     /// A level wake hint for resize, input loss, mode and foreground changes.
     /// Call `take_events` after observing it; byte input has its own pending read.
+    pub fn event_handle(&self) -> Option<HandleRef<'_, ByteChannelObject>> {
+        self.events.as_ref().map(OwnedHandle::as_handle_ref)
+    }
+
     pub fn event_wait_item(&self) -> Option<WaitItem<'_>> {
         self.events.as_ref().map(|events| {
             WaitItem::new(

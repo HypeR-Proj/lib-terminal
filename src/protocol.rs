@@ -21,6 +21,8 @@ pub const TAKE_EVENTS: u16 = 8;
 pub const CLEAR_INPUT: u16 = 9;
 pub const PAUSE_OUTPUT: u16 = 10;
 pub const PRESENTATION: u16 = 11;
+pub const PREPARE_JOB: u16 = 12;
+pub const BIND_JOB: u16 = 13;
 pub const RESPONSE: u16 = 0x8000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +112,7 @@ pub fn encode_settings(settings: Settings) -> [u8; SETTINGS_BYTES] {
         controls.end_of_line,
         controls.start,
         controls.stop,
+        controls.terminate,
     ]
     .iter()
     .enumerate()
@@ -126,22 +129,22 @@ pub fn encode_settings(settings: Settings) -> [u8; SETTINGS_BYTES] {
     bytes[40] = kind;
     bytes[44..48].copy_from_slice(&minimum.to_le_bytes());
     bytes[48..56].copy_from_slice(&time.to_le_bytes());
+    bytes[63] = u8::from(settings.signals);
     bytes
 }
 
 pub fn decode_settings(bytes: &[u8]) -> Option<Settings> {
     if bytes.len() != SETTINGS_BYTES
         || bytes[..16].iter().any(|value| *value > 1)
-        || bytes[56..63].iter().any(|value| *value > 1)
-        || bytes[34..40]
+        || bytes[56..64].iter().any(|value| *value > 1)
+        || bytes[36..40]
             .iter()
             .chain(bytes[41..44].iter())
             .any(|value| *value != 0)
-        || bytes[63] != 0
     {
         return None;
     }
-    let mut controls = [None; 9];
+    let mut controls = [None; 10];
     for (index, control) in controls.iter_mut().enumerate() {
         let value = u16::from_le_bytes([bytes[16 + 2 * index], bytes[17 + 2 * index]]);
         *control = if value == 256 {
@@ -160,6 +163,7 @@ pub fn decode_settings(bytes: &[u8]) -> Option<Settings> {
         _ => return None,
     };
     let settings = Settings {
+        signals: bytes[63] != 0,
         canonical: bytes[0] != 0,
         echo: bytes[1] != 0,
         echo_controls: bytes[2] != 0,
@@ -188,6 +192,7 @@ pub fn decode_settings(bytes: &[u8]) -> Option<Settings> {
             newline_resets_column: bytes[62] != 0,
         },
         controls: ControlCharacters {
+            terminate: controls[9],
             eof: controls[0],
             erase: controls[1],
             kill: controls[2],

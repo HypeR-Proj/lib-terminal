@@ -17,9 +17,9 @@ pub mod protocol;
 pub mod settings;
 
 #[cfg(feature = "client")]
-pub use client::{PreparedClient, Terminal};
+pub use client::{JobEvents, PreparedClient, PreparedJob, Terminal};
 
-pub use events::EventFlags;
+pub use events::{EventFlags, TerminationEvent};
 pub use settings::{
     ControlCharacters, InputFlags, OutputFlags, ReadPolicy, Settings, SettingsError,
 };

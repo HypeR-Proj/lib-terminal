@@ -34,6 +34,8 @@ pub struct OutputFlags {
 /// Disabled controls are `None`; NUL remains a valid configured character.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlCharacters {
+    /// Requests cooperative termination of the foreground job when enabled.
+    pub terminate: Option<u8>,
     pub eof: Option<u8>,
     pub erase: Option<u8>,
     pub kill: Option<u8>,
@@ -48,6 +50,7 @@ pub struct ControlCharacters {
 impl Default for ControlCharacters {
     fn default() -> Self {
         Self {
+            terminate: Some(3),
             eof: Some(4),
             erase: Some(127),
             kill: Some(21),
@@ -72,6 +75,8 @@ pub enum ReadPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Settings {
+    /// Recognize terminal-generated control events independently of canonical input.
+    pub signals: bool,
     pub canonical: bool,
     pub echo: bool,
     pub echo_controls: bool,
@@ -103,6 +108,7 @@ pub enum SettingsError {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            signals: true,
             canonical: true,
             echo: true,
             echo_controls: true,
@@ -141,6 +147,7 @@ impl Settings {
     #[must_use]
     pub fn raw() -> Self {
         Self {
+            signals: false,
             canonical: false,
             echo: false,
             echo_controls: false,
@@ -172,6 +179,25 @@ impl Settings {
     }
 
     pub fn validate(self) -> Result<(), SettingsError> {
+        if self.signals
+            && let Some(terminate) = self.controls.terminate
+            && (terminate == b'\n'
+                || (self.input.receive_flow_control
+                    && [self.controls.start, self.controls.stop].contains(&Some(terminate)))
+                || (self.canonical
+                    && [
+                        self.controls.eof,
+                        self.controls.erase,
+                        self.controls.kill,
+                        self.controls.word_erase,
+                        self.controls.literal_next,
+                        self.controls.reprint,
+                        self.controls.end_of_line,
+                    ]
+                    .contains(&Some(terminate))))
+        {
+            return Err(SettingsError::ConflictingControlCharacters);
+        }
         if self.input.receive_flow_control || self.input.send_flow_control {
             if self.controls.start.is_none() || self.controls.stop.is_none() {
                 return Err(SettingsError::MissingFlowCharacters);
